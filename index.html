@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Place Algorithm Simulator: Geometric Search vs Distance Field</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1e1e1e;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 { margin-bottom: 10px; color: #fff; }
+        .container {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .panel {
+            background-color: #2d2d2d;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+        canvas {
+            border: 2px solid #444;
+            background-color: #000;
+            cursor: crosshair;
+            display: block;
+            margin-bottom: 10px;
+        }
+        .controls {
+            margin-top: 15px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            background: #333;
+            padding: 10px 20px;
+            border-radius: 50px;
+        }
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        button.primary { background-color: #0078d7; color: white; }
+        button.primary:hover { background-color: #0086f0; }
+        button.secondary { background-color: #555; color: white; }
+        button.secondary:hover { background-color: #666; }
+        .legend {
+            font-size: 0.85em;
+            color: #aaa;
+            margin-top: 5px;
+            text-align: left;
+        }
+        .method-title {
+            font-size: 1.2em;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+        .highlight { color: #4af; }
+    </style>
+</head>
+<body>
+
+    <h1>Place Algorithm Comparison Simulator</h1>
+    <p>マウスでドラッグして障害物（コンテナ内の荷物）を描いてください</p>
+
+    <div class="controls">
+        <label>アイテムサイズ: <input type="range" id="sizeRange" min="10" max="80" value="40"></label>
+        <span id="sizeVal">40px</span>
+        <button class="secondary" onclick="clearCanvas()">クリア</button>
+        <button class="primary" onclick="runSimulation()">配置計算実行</button>
+    </div>
+
+    <div class="container">
+        <!-- Current Method -->
+        <div class="panel">
+            <div class="method-title">Current Method: 幾何学的探索</div>
+            <canvas id="canvasCurrent" width="400" height="400"></canvas>
+            <div class="legend">
+                ロジック: 空き領域を走査し、矩形が入る場所を探す。<br>
+                結果: <span style="color:#0f0">■ 緑枠</span> (広い場所の真ん中になりがち)
+            </div>
+        </div>
+
+        <!-- New Method -->
+        <div class="panel">
+            <div class="method-title">New Method: 距離変換 + C-Space</div>
+            <canvas id="canvasNew" width="400" height="400"></canvas>
+            <div class="legend">
+                ロジック: 距離場(Distance Field)を作成し、安全領域を抽出。<br>
+                結果: <span style="color:#f0f">■ ピンク枠</span> (左上奥に整列)
+            </div>
+        </div>
+    </div>
+
+<script>
+    // Configuration
+    const width = 400;
+    const height = 400;
+    const canvasCurrent = document.getElementById('canvasCurrent');
+    const ctxCurrent = canvasCurrent.getContext('2d');
+    const canvasNew = document.getElementById('canvasNew');
+    const ctxNew = canvasNew.getContext('2d');
+    
+    let obstacles = []; // Array of pixels (0: empty, 1: obstacle)
+    let itemSize = 40;
+    let isDrawing = false;
+
+    // Initialize Grid
+    function initGrid() {
+        obstacles = new Uint8Array(width * height).fill(0);
+        // Add container walls
+        for(let y=0; y<height; y++) {
+            for(let x=0; x<width; x++) {
+                if (x < 10 || x > width-10 || y < 10 || y > height-10) {
+                    obstacles[y*width+x] = 1;
+                }
+            }
+        }
+        drawAll();
+    }
+
+    // Drawing Logic
+    function getMousePos(canvas, evt) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+            x: Math.floor(evt.clientX - rect.left),
+            y: Math.floor(evt.clientY - rect.top)
+        };
+    }
+
+    function addObstacle(x, y, radius=15) {
+        for(let dy = -radius; dy <= radius; dy++) {
+            for(let dx = -radius; dx <= radius; dx++) {
+                if (dx*dx + dy*dy <= radius*radius) {
+                    const nx = x + dx;
+                    const ny = y + dy;
+                    if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                        obstacles[ny*width+nx] = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    function setupCanvasInput(canvas) {
+        canvas.addEventListener('mousedown', e => { isDrawing = true; const p = getMousePos(canvas, e); addObstacle(p.x, p.y); drawAll(); });
+        canvas.addEventListener('mousemove', e => { if(isDrawing) { const p = getMousePos(canvas, e); addObstacle(p.x, p.y); drawAll(); } });
+        canvas.addEventListener('mouseup', () => isDrawing = false);
+        canvas.addEventListener('mouseleave', () => isDrawing = false);
+    }
+
+    setupCanvasInput(canvasCurrent);
+    setupCanvasInput(canvasNew); // Sync drawing
+
+    // Visualization
+    function drawBase(ctx) {
+        const imgData = ctx.createImageData(width, height);
+        const data = imgData.data;
+        for (let i = 0; i < obstacles.length; i++) {
+            const val = obstacles[i] ? 100 : 0; // Gray obstacles
+            data[i*4] = val;
+            data[i*4+1] = val;
+            data[i*4+2] = val;
+            data[i*4+3] = 255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+    }
+
+    function drawAll() {
+        drawBase(ctxCurrent);
+        drawBase(ctxNew);
+    }
+
+    // --- ALGORITHM 1: Current Geometric Search (Simulation) ---
+    function runCurrentAlgo() {
+        drawBase(ctxCurrent);
+        
+        // Simulate "Finding Free Space Polygon & Fitting Rect"
+        // Simplified: Brute force search for a valid spot, prioritizing "Center" of large spaces
+        // or just the first valid one found in a naive scan.
+        // To mimic "floating in the middle", we'll score by distance to nearest obstacle (maximize clearance)
+        
+        // 1. Compute clearance for center estimation (simplified distance transform)
+        const distMap = computeDistanceTransform();
+        
+        let bestScore = -1;
+        let bestX = -1;
+        let bestY = -1;
+        const half = Math.floor(itemSize / 2);
+
+        // Search Grid
+        for (let y = half; y < height - half; y += 4) {
+            for (let x = half; x < width - half; x += 4) {
+                // Check if rect fits
+                if (checkRectFits(x, y, half)) {
+                    // Current Algo Tendency: Maximizes Clearance (Safe center)
+                    // Or finds *any* spot. Let's simulate "Maximizing Clearance" = putting in middle
+                    const clearance = distMap[y*width+x];
+                    if (clearance > bestScore) {
+                        bestScore = clearance;
+                        bestX = x;
+                        bestY = y;
+                    }
+                }
+            }
+        }
+
+        if (bestX !== -1) {
+            // Draw Result
+            ctxCurrent.strokeStyle = '#0f0';
+            ctxCurrent.lineWidth = 3;
+            ctxCurrent.strokeRect(bestX - half, bestY - half, itemSize, itemSize);
+            
+            ctxCurrent.fillStyle = '#0f0';
+            ctxCurrent.beginPath();
+            ctxCurrent.arc(bestX, bestY, 3, 0, Math.PI*2);
+            ctxCurrent.fill();
+        }
+    }
+
+    function checkRectFits(cx, cy, half) {
+        // Naive check of corners and center
+        // Real algo checks full area or polygon intersection
+        const idx = (y, x) => y*width + x;
+        for (let y = cy - half; y <= cy + half; y++) {
+            for (let x = cx - half; x <= cx + half; x++) {
+                if (obstacles[idx(y,x)] === 1) return false;
+            }
+        }
+        return true;
+    }
+
+    // --- ALGORITHM 2: Distance Field + C-Space (New) ---
+    function runNewAlgo() {
+        // 1. Compute Distance Transform
+        const distMap = computeDistanceTransform();
+
+        // 2. Visualization: Heatmap
+        const imgData = ctxNew.createImageData(width, height);
+        const data = imgData.data;
+        const maxDist = 100; // Visualization scale
+
+        // 3. Find Best Point (Minimize Dead Space)
+        // Score = (Y * Weight + X) -> Prefer Top-Left (or Bottom-Left depending on coord system)
+        // Let's prefer Top-Left (Min Y, Min X)
+        
+        let bestX = -1;
+        let bestY = -1;
+        let minDeadSpaceScore = Infinity;
+        const radius = itemSize / 2; // Treat item roughly as circle for C-space viz or Box radius
+
+        // Valid Region Mask (C-Space)
+        // For a square item, distance to obstacle must be > half_width
+        // Note: Euclidean DT is circular, but for square item we need slightly different logic (erosion).
+        // For simplicity/viz, we use the Euclidean distance > radius * sqrt(2) (safe approximation) or just radius.
+        // Let's use radius for tight fit viz.
+        
+        for (let i = 0; i < distMap.length; i++) {
+            const val = distMap[i];
+            const x = i % width;
+            const y = Math.floor(i / width);
+            const isObstacle = obstacles[i] === 1;
+
+            // Visualization Color
+            if (isObstacle) {
+                data[i*4] = 100; data[i*4+1] = 100; data[i*4+2] = 100; data[i*4+3] = 255;
+            } else {
+                // Heatmap blue -> red
+                const intensity = Math.min(val / maxDist, 1.0);
+                data[i*4] = Math.floor(255 * intensity); // R
+                data[i*4+1] = Math.floor(50 * intensity); // G
+                data[i*4+2] = Math.floor(255 * (1 - intensity)); // B
+                data[i*4+3] = 255;
+            }
+
+            // --- THE CORE LOGIC ---
+            // Threshold: Is this point safe center?
+            // Rigorous for square: distance >= itemSize/2 is safe for inscribed circle.
+            // For box fit in L1 metric, it's different, but L2 (Euclidean) > size/2 is a good "Safe Mask".
+            
+            // To be strictly correct for a square item, we'd erode the binary map by square kernel.
+            // But distance transform > radius is the standard C-Space approximation.
+            if (val >= itemSize / 2) {
+                // Visualization: Highlight "Valid Region" slightly
+                data[i*4] += 50; data[i*4+1] += 50; data[i*4+2] += 50;
+
+                // Optimization: Minimize Dead Space (e.g., Min X + Min Y)
+                // Heuristic: dist from (0,0) or simply X+Y
+                const score = x + y*2; // Prefer Top (y=0) then Left (x=0). Weight Y more to fill rows.
+                
+                if (score < minDeadSpaceScore) {
+                    minDeadSpaceScore = score;
+                    bestX = x;
+                    bestY = y;
+                }
+            }
+        }
+        ctxNew.putImageData(imgData, 0, 0);
+
+        if (bestX !== -1) {
+            // Draw Result
+            ctxNew.strokeStyle = '#f0f';
+            ctxNew.lineWidth = 3;
+            // Draw Box
+            ctxNew.strokeRect(bestX - radius, bestY - radius, itemSize, itemSize);
+            
+            // Draw Center
+            ctxNew.fillStyle = '#f0f';
+            ctxNew.beginPath();
+            ctxNew.arc(bestX, bestY, 3, 0, Math.PI*2);
+            ctxNew.fill();
+
+            // Visualise the "Force" pulling it to corner
+            ctxNew.beginPath();
+            ctxNew.strokeStyle = 'white';
+            ctxNew.moveTo(bestX, bestY);
+            ctxNew.lineTo(0, 0);
+            ctxNew.setLineDash([5, 5]);
+            ctxNew.stroke();
+            ctxNew.setLineDash([]);
+        }
+    }
+
+    // Helper: Euclidean Distance Transform (Squared) - Naive O(N^2) is too slow for realtime JS, 
+    // using Two-Pass O(N) algorithm (Meijster approx or just simple DP)
+    // Here: Simple 2-pass DP for L1/L2 approx.
+    function computeDistanceTransform() {
+        // Initialize with infinity
+        const dist = new Float32Array(width * height).fill(Infinity);
+        
+        // 0 at obstacles
+        for(let i=0; i<obstacles.length; i++) {
+            if(obstacles[i] === 1) dist[i] = 0;
+        }
+
+        // Forward pass (Top-Left to Bottom-Right)
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const i = y*width + x;
+                if (obstacles[i] === 1) continue;
+                
+                // Check Left and Top
+                const left = (x > 0) ? dist[i-1] + 1 : Infinity;
+                const top = (y > 0) ? dist[i-width] + 1 : Infinity;
+                dist[i] = Math.min(dist[i], left, top);
+            }
+        }
+
+        // Backward pass (Bottom-Right to Top-Left)
+        for (let y = height - 1; y >= 0; y--) {
+            for (let x = width - 1; x >= 0; x--) {
+                const i = y*width + x;
+                if (obstacles[i] === 1) continue;
+
+                // Check Right and Bottom
+                const right = (x < width - 1) ? dist[i+1] + 1 : Infinity;
+                const bottom = (y < height - 1) ? dist[i+width] + 1 : Infinity;
+                dist[i] = Math.min(dist[i], right, bottom);
+            }
+        }
+        
+        // Note: This is Manhattan (L1) distance for simplicity and speed in JS.
+        // It produces diamond shapes instead of circles, but demonstrates the concept perfectly.
+        return dist;
+    }
+
+    // Controls
+    document.getElementById('sizeRange').addEventListener('input', (e) => {
+        itemSize = parseInt(e.target.value);
+        document.getElementById('sizeVal').textContent = itemSize + 'px';
+        runSimulation();
+    });
+
+    function clearCanvas() {
+        initGrid();
+    }
+
+    function runSimulation() {
+        runCurrentAlgo();
+        runNewAlgo();
+    }
+
+    // Start
+    initGrid();
+    setTimeout(runSimulation, 100);
+
+</script>
+</body>
+</html>
